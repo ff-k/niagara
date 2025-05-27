@@ -54,12 +54,14 @@ static bool isInstanceExtensionSupported(const char* name)
 	return false;
 }
 
-VkInstance createInstance()
+vulkanInstance createInstance()
 {
+	vulkanInstance result = {};
+
 	if (volkGetInstanceVersion() < API_VERSION)
 	{
 		fprintf(stderr, "ERROR: Vulkan 1.%d instance not found\n", VK_VERSION_MINOR(API_VERSION));
-		return 0;
+		return result;
 	}
 
 	VkApplicationInfo appInfo = { VK_STRUCTURE_TYPE_APPLICATION_INFO };
@@ -119,6 +121,13 @@ VkInstance createInstance()
 	if (isInstanceExtensionSupported(VK_EXT_DEBUG_UTILS_EXTENSION_NAME))
 		extensions.push_back(VK_EXT_DEBUG_UTILS_EXTENSION_NAME);
 
+	if (isInstanceExtensionSupported(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME) && isInstanceExtensionSupported(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME))
+	{
+		extensions.push_back(VK_KHR_GET_SURFACE_CAPABILITIES_2_EXTENSION_NAME);
+		extensions.push_back(VK_EXT_SURFACE_MAINTENANCE_1_EXTENSION_NAME);
+		result.swapchainMaintenance1DependenciesSupported = true;
+	}
+
 	createInfo.ppEnabledExtensionNames = extensions.data();
 	createInfo.enabledExtensionCount = extensions.size();
 
@@ -126,10 +135,9 @@ VkInstance createInstance()
 	createInfo.flags |= VK_INSTANCE_CREATE_ENUMERATE_PORTABILITY_BIT_KHR;
 #endif
 
-	VkInstance instance = 0;
-	VK_CHECK(vkCreateInstance(&createInfo, 0, &instance));
+	VK_CHECK(vkCreateInstance(&createInfo, 0, &result.instance));
 
-	return instance;
+	return result;
 }
 
 static VkBool32 VKAPI_CALL debugReportCallback(VkDebugReportFlagsEXT flags, VkDebugReportObjectTypeEXT objectType, uint64_t object, size_t location, int32_t messageCode, const char* pLayerPrefix, const char* pMessage, void* pUserData)
@@ -260,7 +268,7 @@ VkPhysicalDevice pickPhysicalDevice(VkPhysicalDevice* physicalDevices, uint32_t 
 	return result;
 }
 
-VkDevice createDevice(VkInstance instance, VkPhysicalDevice physicalDevice, uint32_t familyIndex, bool meshShadingSupported, bool raytracingSupported, bool clusterrtSupported)
+VkDevice createDevice(VkInstance instance, VkPhysicalDevice physicalDevice, uint32_t familyIndex, bool meshShadingSupported, bool raytracingSupported, bool clusterrtSupported, bool swapchainMaintenance1Supported)
 {
 	float queuePriorities[] = { 1.0f };
 
@@ -272,6 +280,11 @@ VkDevice createDevice(VkInstance instance, VkPhysicalDevice physicalDevice, uint
 	std::vector<const char*> extensions = {
 		VK_KHR_SWAPCHAIN_EXTENSION_NAME,
 	};
+
+	if (swapchainMaintenance1Supported)
+	{
+		extensions.push_back(VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME);
+	}
 
 	if (meshShadingSupported)
 		extensions.push_back(VK_EXT_MESH_SHADER_EXTENSION_NAME);
@@ -329,6 +342,10 @@ VkDevice createDevice(VkInstance instance, VkPhysicalDevice physicalDevice, uint
 	features14.maintenance6 = true;
 	features14.pushDescriptor = true;
 
+	// This will only be used if swapchainMaintenance1Supported=true (see below)
+	VkPhysicalDeviceSwapchainMaintenance1FeaturesEXT featuresSwapchainMaintenance = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT };
+	featuresSwapchainMaintenance.swapchainMaintenance1 = true;
+
 	// This will only be used if meshShadingSupported=true (see below)
 	VkPhysicalDeviceMeshShaderFeaturesEXT featuresMesh = { VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MESH_SHADER_FEATURES_EXT };
 	featuresMesh.taskShader = true;
@@ -356,6 +373,12 @@ VkDevice createDevice(VkInstance instance, VkPhysicalDevice physicalDevice, uint
 	features13.pNext = &features14;
 
 	void** ppNext = &features14.pNext;
+
+	if (swapchainMaintenance1Supported)
+	{
+		*ppNext = &featuresSwapchainMaintenance;
+		ppNext = &featuresSwapchainMaintenance.pNext;
+	}
 
 	if (meshShadingSupported)
 	{

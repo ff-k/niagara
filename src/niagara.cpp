@@ -344,24 +344,24 @@ int main(int argc, const char** argv)
 
 	glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
 
-	VkInstance instance = createInstance();
-	if (!instance)
+	vulkanInstance instance = createInstance();
+	if (!instance.instance)
 		return -1;
 
-	volkLoadInstanceOnly(instance);
+	volkLoadInstanceOnly(instance.instance);
 
-	VkDebugReportCallbackEXT debugCallback = registerDebugCallback(instance);
+	VkDebugReportCallbackEXT debugCallback = registerDebugCallback(instance.instance);
 
 	VkPhysicalDevice physicalDevices[16];
 	uint32_t physicalDeviceCount = sizeof(physicalDevices) / sizeof(physicalDevices[0]);
-	VK_CHECK(vkEnumeratePhysicalDevices(instance, &physicalDeviceCount, physicalDevices));
+	VK_CHECK(vkEnumeratePhysicalDevices(instance.instance, &physicalDeviceCount, physicalDevices));
 
 	VkPhysicalDevice physicalDevice = pickPhysicalDevice(physicalDevices, physicalDeviceCount);
 	if (!physicalDevice)
 	{
 		if (debugCallback)
-			vkDestroyDebugReportCallbackEXT(instance, debugCallback, 0);
-		vkDestroyInstance(instance, 0);
+			vkDestroyDebugReportCallbackEXT(instance.instance, debugCallback, 0);
+		vkDestroyInstance(instance.instance, 0);
 		return -1;
 	}
 
@@ -371,12 +371,14 @@ int main(int argc, const char** argv)
 	std::vector<VkExtensionProperties> extensions(extensionCount);
 	VK_CHECK(vkEnumerateDeviceExtensionProperties(physicalDevice, 0, &extensionCount, extensions.data()));
 
+	bool swapchainMaintenance1Supported = false;
 	bool meshShadingSupported = false;
 	bool raytracingSupported = false;
 	bool clusterrtSupported = false;
 
 	for (auto& ext : extensions)
 	{
+		swapchainMaintenance1Supported = swapchainMaintenance1Supported || strcmp(ext.extensionName, VK_EXT_SWAPCHAIN_MAINTENANCE_1_EXTENSION_NAME) == 0;
 		meshShadingSupported = meshShadingSupported || strcmp(ext.extensionName, VK_EXT_MESH_SHADER_EXTENSION_NAME) == 0;
 		raytracingSupported = raytracingSupported || strcmp(ext.extensionName, VK_KHR_RAY_QUERY_EXTENSION_NAME) == 0;
 
@@ -384,6 +386,7 @@ int main(int argc, const char** argv)
 		clusterrtSupported = clusterrtSupported || strcmp(ext.extensionName, VK_NV_CLUSTER_ACCELERATION_STRUCTURE_EXTENSION_NAME) == 0;
 #endif
 	}
+	swapchainMaintenance1Supported = instance.swapchainMaintenance1DependenciesSupported && swapchainMaintenance1Supported;
 
 	meshShadingEnabled = meshShadingSupported;
 
@@ -394,7 +397,7 @@ int main(int argc, const char** argv)
 	uint32_t familyIndex = getGraphicsFamilyIndex(physicalDevice);
 	assert(familyIndex != VK_QUEUE_FAMILY_IGNORED);
 
-	VkDevice device = createDevice(instance, physicalDevice, familyIndex, meshShadingSupported, raytracingSupported, clusterrtSupported);
+	VkDevice device = createDevice(instance.instance, physicalDevice, familyIndex, meshShadingSupported, raytracingSupported, clusterrtSupported, swapchainMaintenance1Supported);
 	assert(device);
 
 	volkLoadDevice(device);
@@ -405,7 +408,7 @@ int main(int argc, const char** argv)
 	glfwSetKeyCallback(window, keyCallback);
 	glfwSetMouseButtonCallback(window, mouseCallback);
 
-	VkSurfaceKHR surface = createSurface(instance, window);
+	VkSurfaceKHR surface = createSurface(instance.instance, window);
 	assert(surface);
 
 	VkBool32 presentSupported = 0;
@@ -425,6 +428,16 @@ int main(int argc, const char** argv)
 		releaseSemaphores[i] = createSemaphore(device);
 		frameFences[i] = createFence(device);
 		assert(acquireSemaphores[i] && releaseSemaphores[i] && frameFences[i]);
+	}
+
+	VkFence presentFences[MAX_FRAMES] = {};
+	if (swapchainMaintenance1Supported)
+	{
+		for (int i = 0; i < MAX_FRAMES; ++i)
+		{
+			presentFences[i] = createFence(device);
+			assert(presentFences[i]);
+		}
 	}
 
 	VkQueue queue = 0;
@@ -1767,7 +1780,15 @@ int main(int argc, const char** argv)
 
 		VK_CHECK_FORCE(vkQueueSubmit(queue, 1, &submitInfo, frameFence));
 
+		VkSwapchainPresentFenceInfoEXT presentFenceInfo = { VK_STRUCTURE_TYPE_SWAPCHAIN_PRESENT_FENCE_INFO_EXT };
 		VkPresentInfoKHR presentInfo = { VK_STRUCTURE_TYPE_PRESENT_INFO_KHR };
+		if (swapchainMaintenance1Supported)
+		{
+			presentFenceInfo.swapchainCount = 1;
+			presentFenceInfo.pFences = &presentFences[frameIndex % MAX_FRAMES];
+
+			presentInfo.pNext = &presentFenceInfo;
+		}
 		presentInfo.waitSemaphoreCount = 1;
 		presentInfo.pWaitSemaphores = &releaseSemaphore;
 		presentInfo.swapchainCount = 1;
@@ -1778,10 +1799,12 @@ int main(int argc, const char** argv)
 
 		if (frameIndex >= MAX_FRAMES - 1)
 		{
-			VkFence waitFence = frameFences[(frameIndex - (MAX_FRAMES - 1)) % MAX_FRAMES];
+			int waitIndex = (frameIndex - (MAX_FRAMES - 1)) % MAX_FRAMES;
+			VkFence waitFences[] = { frameFences[waitIndex], presentFences[waitIndex] };
+			uint32_t waitFenceCount = swapchainMaintenance1Supported ? 2 : 1;
 
-			VK_CHECK(vkWaitForFences(device, 1, &waitFence, VK_TRUE, ~0ull));
-			VK_CHECK(vkResetFences(device, 1, &waitFence));
+			VK_CHECK(vkWaitForFences(device, waitFenceCount, waitFences, VK_TRUE, ~0ull));
+			VK_CHECK(vkResetFences(device, waitFenceCount, waitFences));
 
 			VK_CHECK_QUERY(vkGetQueryPoolResults(device, queryPoolTimestamp, 0, COUNTOF(timestampResults), sizeof(timestampResults), timestampResults, sizeof(timestampResults[0]), VK_QUERY_RESULT_64_BIT));
 			VK_CHECK_QUERY(vkGetQueryPoolResults(device, queryPoolPipeline, 0, COUNTOF(pipelineResults), sizeof(pipelineResults), pipelineResults, sizeof(pipelineResults[0]), VK_QUERY_RESULT_64_BIT));
@@ -1912,6 +1935,11 @@ int main(int argc, const char** argv)
 	vkDestroySampler(device, readSampler, 0);
 	vkDestroySampler(device, depthSampler, 0);
 
+	if (swapchainMaintenance1Supported)
+	{
+		for (VkFence fence : presentFences)
+			vkDestroyFence(device, fence, 0);
+	}
 	for (VkFence fence : frameFences)
 		vkDestroyFence(device, fence, 0);
 	for (VkSemaphore semaphore : acquireSemaphores)
@@ -1919,16 +1947,16 @@ int main(int argc, const char** argv)
 	for (VkSemaphore semaphore : releaseSemaphores)
 		vkDestroySemaphore(device, semaphore, 0);
 
-	vkDestroySurfaceKHR(instance, surface, 0);
+	vkDestroySurfaceKHR(instance.instance, surface, 0);
 
 	glfwDestroyWindow(window);
 
 	vkDestroyDevice(device, 0);
 
 	if (debugCallback)
-		vkDestroyDebugReportCallbackEXT(instance, debugCallback, 0);
+		vkDestroyDebugReportCallbackEXT(instance.instance, debugCallback, 0);
 
-	vkDestroyInstance(instance, 0);
+	vkDestroyInstance(instance.instance, 0);
 
 	volkFinalize();
 }
